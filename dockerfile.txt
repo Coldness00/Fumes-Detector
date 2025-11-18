@@ -17,6 +17,4 @@ COPY key.pem /app/key.pem
 
 RUN mkdir -p /app/images  # Optional: can also be removed since host bind-mount handles it
 
-# ❌ REMOVE THIS LINE:
-# VOLUME ["/app/images"]
 CMD ["python", "main.py"]
