@@ -5,7 +5,9 @@ Here is a **clean, polished, perfectly formatted README.md**, ready to paste dir
 ```markdown
 # RTSP Blackmist Detector 🚨💨
 
-A Dockerized system that watches an **RTSP video stream** for **fume / dark smoke** using a vision‑language model, stores results in **InfluxDB**, and exposes them through a lightweight **web dashboard**.
+A Dockerized system that watches an **RTSP video stream** for **fume / dark smoke**
+using a vision‑language model, stores results in **InfluxDB**,
+and exposes them through a lightweight **web dashboard**.
 
 ---
 
