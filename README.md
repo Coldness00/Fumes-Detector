@@ -14,6 +14,9 @@ and exposes them through a lightweight **web dashboard**.
 - 🌐 Web interface to view detections and history  
 - 🔒 HTTPS support via your own `cert.pem` and `key.pem`  
 
+Web page example:
+<img width="425" height="472" alt="image" src="https://github.com/user-attachments/assets/1bd33658-2f9c-4366-aefb-4f0f3fe6960c" />
+
 ---
 
 ## 🧩 Requirements
@@ -195,6 +198,8 @@ If using self‑signed certificates, your browser may show a warning—this is e
 ## 🗂 Grafana Dashboard
 
 You can find enclosed an example of a Grafana Dashboard, copy/paste as a new dashboard, then edit the entites name accorgindlgy.
+<img width="516" height="316" alt="image" src="https://github.com/user-attachments/assets/13a384ef-5270-4b8a-97b2-fdf81989434b" />
+
 ---
 
 ## ❓ Questions / Issues
