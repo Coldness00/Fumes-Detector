@@ -1,8 +1,3 @@
-Here is a **clean, polished, perfectly formatted README.md**, ready to paste directly into GitHub.
-
----
-
-```markdown
 # RTSP Blackmist Detector 🚨💨
 
 A Dockerized system that watches an **RTSP video stream** for **fume / dark smoke**
