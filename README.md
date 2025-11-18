@@ -199,6 +199,7 @@ If using self‑signed certificates, your browser may show a warning—this is e
 ## 👨‍💻 Grafana Dashboard
 
 You can find enclosed an example of a Grafana Dashboard, copy/paste as a new dashboard, then edit the entites name accorgindlgy.
+
 <img width="516" height="316" alt="image" src="https://github.com/user-attachments/assets/13a384ef-5270-4b8a-97b2-fdf81989434b" />
 
 ---
