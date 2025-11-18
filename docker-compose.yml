@@ -21,11 +21,11 @@ services:
       - OLLAMA_TOP_P=0.95
       - OLLAMA_SEED=42
       - CAMERA_NAME=Black Towers From BB Rooftop
-      - RTSP_URL=rtsp://admin:Goodyear2019@172.31.51.20:554/Streaming/Channels/301
+      - RTSP_URL=rtsp://ID:PASSWORD@172.31.51.20:554/Streaming/Channels/301
       - INFLUX_URL=http://172.27.69.153:8086/write
       - INFLUX_DB=LUPowerhouse
-      - INFLUX_USER=IOTsensor # optional if no authd
-      - INFLUX_PASS=J3!377*5q875  # optional if no auth
+      - INFLUX_USER=ID # optional if no authd
+      - INFLUX_PASS=PASSOWKRD  # optional if no auth
       - MEASUREMENT=smoke_detection_blacktower
       - PROCESSED_LOG=/app/processed.log
       - TZ=Europe/Paris
