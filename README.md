@@ -52,25 +52,29 @@ Recommended model:
 ollama pull qwen2.5vl
 ```
 
-### 5. Clone the repository
+### 5. Clone the repository and open it
 
 ```bash
 gh repo clone Coldness00/Fumes-Detector
-cd rtsp-blackmist-detector
+cd Fumes-Detector
 ```
 
 ### 6. Provide certificates
 
-At the root of the repo, create:
+These are required for HTTPS access.
+At the root of the repo, put:
 
 ```
 cert.pem
 key.pem
 ```
-
-These are required for HTTPS access.
+This command line will create them for 10years.
+```
+openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes
+```
 
 ---
+
 
 ## ⚙️ Configuration (docker-compose.yml)
 
@@ -175,6 +179,7 @@ docker compose logs -f
 Open:
 
 ```
+http://<BASE_URL>:<PORT> -> http://192.168.1.15:9822
 https://<BASE_URL>:<PORT>
 ```
 
