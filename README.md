@@ -192,6 +192,9 @@ If using self‑signed certificates, your browser may show a warning—this is e
 └── requirements.txt
 ```
 
+## 🗂 Grafana Dashboard
+
+You can find enclosed an example of a Grafana Dashboard, copy/paste as a new dashboard, then edit the entites name accorgindlgy.
 ---
 
 ## ❓ Questions / Issues
