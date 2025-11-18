@@ -1,7 +1,7 @@
 # RTSP Blackmist Detector 🚨💨
 
 A Dockerized system that watches an **RTSP video stream** for **fume / dark smoke**
-using a vision‑language model, stores results in **InfluxDB**,
+using a **LOCAL** vision‑language model, stores results in **InfluxDB**,
 and exposes them through a lightweight **web dashboard**.
 
 ---
