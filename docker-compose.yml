@@ -1,0 +1,39 @@
+services:
+  blackmist-checker:
+    build: .
+    container_name: blackmist-checker
+    environment:
+      - FOLDER_PATH=/app/images
+      - DB_PATH=/app/data/processed_images.db
+      - BASE_URL= http://172.31.60.178:9822 # Base URL for image links
+      #- EXTERNAL_URL=  # Optional external URL for reverse proxy
+      - OLLAMA_URL=http://172.17.0.1:11434/api/generate
+      - OLLAMA_MODEL=qwen2.5vl
+      #llama3.2-vision
+      #llava
+      #qwen2.5vl
+      #gemma3:4b
+      #minicpm-v
+      #deepseek-r1
+      - REFRESH_TIME=40 #in the cycle there 5s to add for rtsp warmup
+      - PROMPT="Is there black smoke or mist-like fume in the picture? I prefer false positives to false negatives. Answer ONLY with one of the following formats \(no explanation\). Yes = [grade] No = [grade] Maybe = [grade] Grade must be an integer from 0 to 100 indicating the presence level of the smoke or fume. Do not explain your answer. Only respond in the exact format."
+      - OLLAMA_TEMPERATURE=0.2
+      - OLLAMA_TOP_P=0.95
+      - OLLAMA_SEED=42
+      - CAMERA_NAME=Black Towers From BB Rooftop
+      - RTSP_URL=rtsp://admin:Goodyear2019@172.31.51.20:554/Streaming/Channels/301
+      - INFLUX_URL=http://172.27.69.153:8086/write
+      - INFLUX_DB=LUPowerhouse
+      - INFLUX_USER=IOTsensor # optional if no authd
+      - INFLUX_PASS=J3!377*5q875  # optional if no auth
+      - MEASUREMENT=smoke_detection_blacktower
+      - PROCESSED_LOG=/app/processed.log
+      - TZ=Europe/Paris
+    volumes:
+      - /home/ac18116/AIagents/rtsp-blackmist-detector/images:/app/images:rw
+      - /home/ac18116/AIagents/rtsp-blackmist-detector/data:/app/data:rw
+    ports:
+      - "9822:9822"
+      - "9823:9823" #SSL
+    network_mode: bridge
+    restart: unless-stopped
