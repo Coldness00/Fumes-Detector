@@ -203,6 +203,4 @@ If using self‑signed certificates, your browser may show a warning—this is e
 
 Feel free to open an Issue or request enhancements.  
 Contributions and suggestions are always welcome! 🚀
-```
 
----
