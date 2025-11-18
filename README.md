@@ -15,6 +15,7 @@ and exposes them through a lightweight **web dashboard**.
 - 🔒 HTTPS support via your own `cert.pem` and `key.pem`  
 
 Web page example:
+
 <img width="425" height="472" alt="image" src="https://github.com/user-attachments/assets/1bd33658-2f9c-4366-aefb-4f0f3fe6960c" />
 
 ---
