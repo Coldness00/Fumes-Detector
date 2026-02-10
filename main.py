@@ -329,9 +329,17 @@ def get_latest_image():
         f for f in os.listdir(FOLDER_PATH)
         if f.lower().endswith((".jpg", ".jpeg", ".png"))
     ]
+
     if not files:
         return None
-    files = sorted(files, key=lambda f: os.path.getmtime(os.path.join(FOLDER_PATH, f)), reverse=True)
+
+    def safe_mtime(filename):
+        try:
+            return os.path.getmtime(os.path.join(FOLDER_PATH, filename))
+        except FileNotFoundError:
+            return 0  # file vanished
+
+    files = sorted(files, key=safe_mtime, reverse=True)
     return files[0]
 
 #look for the answer from the AI
