@@ -56,9 +56,12 @@ def ask_llava_stream(image_b64, prompt):
         "model": OLLAMA_MODEL,
         "prompt": prompt,
         "images": [image_b64],
-        "temperature": OLLAMA_TEMPERATURE,
-        "top_p": OLLAMA_TOP_P,
-        "seed": OLLAMA_SEED,
+        "options": {                        # ← wrap parameters here
+            "temperature": OLLAMA_TEMPERATURE,
+            "top_p": OLLAMA_TOP_P,
+            "seed": OLLAMA_SEED,
+            "num_ctx": 8192,
+        }
     }
     response = requests.post(
         OLLAMA_URL,
