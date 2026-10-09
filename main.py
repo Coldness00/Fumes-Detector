@@ -34,10 +34,39 @@ OLLAMA_TOP_P = float(os.getenv("OLLAMA_TOP_P", "0.9"))
 OLLAMA_SEED = int(os.getenv("OLLAMA_SEED", "42"))
 CLEANUP_INTERVAL = 1 * 60 * 60  # Run cleanup every 24 hours (in seconds)
 IMAGE_RETENTION_DAYS = int(os.getenv("IMAGE_RETENTION_DAYS", "15"))
+HEALTH_MAX_SNAPSHOT_AGE = int(os.getenv("HEALTH_MAX_SNAPSHOT_AGE", "600"))
+SELF_EXIT_AFTER_STALE = int(os.getenv("SELF_EXIT_AFTER_STALE", str(HEALTH_MAX_SNAPSHOT_AGE)))
+SELF_EXIT_ENABLED = os.getenv("SELF_EXIT_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
+STARTUP_GRACE_PERIOD = 120
+SELF_EXIT_CHECK_INTERVAL = 30
 
 app = Flask(__name__)
 analysis_results = {}  # Cache of filename -> result string
 request_lock = Lock()
+results_lock = Lock()
+
+# Monotonic timestamps avoid wall-clock changes affecting health decisions.
+process_started_at = time.monotonic()
+last_successful_snapshot = None
+cleanup_active = threading.Event()
+
+def record_successful_snapshot():
+    """Record the monotonic time of the most recent successful snapshot."""
+    global last_successful_snapshot
+    last_successful_snapshot = time.monotonic()
+
+def snapshot_age_seconds():
+    """Return age of the last successful snapshot, or None if there is none."""
+    if last_successful_snapshot is None:
+        return None
+    return time.monotonic() - last_successful_snapshot
+
+def snapshot_health_state(max_age=HEALTH_MAX_SNAPSHOT_AGE):
+    """Return the shared snapshot-health state used by /health and self-exit."""
+    age = snapshot_age_seconds()
+    in_startup_grace = time.monotonic() - process_started_at < STARTUP_GRACE_PERIOD
+    stale = age is None or age > max_age
+    return age, stale, in_startup_grace
 
 db.init_db()  # Initialize your SQLite DB on startup
 
@@ -95,23 +124,27 @@ def extract_answer(text):
     # If no confidence format found, return unknown
     return "unknown"
 
-@app.route("/")
-def index():
-    page = int(request.args.get("page", 1))
-    per_page = 30
-
+def get_filtered_files():
+    """Return image filenames matching the current request's filters."""
     all_files = sorted(
         [f for f in os.listdir(FOLDER_PATH) if f.lower().endswith((".jpg", ".jpeg", ".png"))],
         key=lambda f: os.path.getmtime(os.path.join(FOLDER_PATH, f)),
         reverse=True
     )
 
-    if not analysis_results:
-        for filename, result in db.load_all_results().items():
-            analysis_results[filename] = result
+    with results_lock:
+        results_empty = not analysis_results
+    if results_empty:
+        loaded_results = db.load_all_results()
+        with results_lock:
+            if not analysis_results:
+                analysis_results.update(loaded_results)
+    # Always use a copy while outside the lock; callers must not read the
+    # mutable cache while analyses may be updating it.
+    with results_lock:
+        results_snapshot = dict(analysis_results)
 
     filter_answer = request.args.get("answer", "").lower()
-
     if filter_answer == "yesmaybe":
         filter_answers = ["yes", "maybe"]
     elif filter_answer:
@@ -121,9 +154,7 @@ def index():
 
     datetime_start = request.args.get("datetime_start")
     datetime_end = request.args.get("datetime_end")
-
-    start_dt = None
-    end_dt = None
+    start_dt = end_dt = None
     try:
         if datetime_start:
             start_dt = datetime.strptime(datetime_start, "%Y-%m-%dT%H:%M")
@@ -134,39 +165,60 @@ def index():
 
     filtered_files = []
     for f in all_files:
-        result = analysis_results.get(f, "")
-        answer = extract_answer(result)
-        # Filter by answer list
-        if filter_answers and answer not in filter_answers:
+        result = results_snapshot.get(f, "")
+        if filter_answers and extract_answer(result) not in filter_answers:
             continue
         file_path = os.path.join(FOLDER_PATH, f)
         file_mtime = datetime.fromtimestamp(os.path.getmtime(file_path))
-        # Filter by date range
         if start_dt and file_mtime < start_dt:
             continue
         if end_dt and file_mtime > end_dt:
             continue
         filtered_files.append(f)
-    total_pages = (len(filtered_files) + per_page - 1) // per_page
-    page = max(1, min(page, total_pages)) if total_pages > 0 else 1
-    start = (page - 1) * per_page
-    end = start + per_page
-    files = filtered_files[start:end]
+    return filtered_files, results_snapshot, filter_answer, datetime_start, datetime_end
 
+
+def render_image_batch(files, results_snapshot):
+    return render_template_string(ITEM_TEMPLATE, files=files, results=results_snapshot)
+
+
+@app.route("/")
+def index():
+    per_page = 24
+    filtered_files, results_snapshot, filter_answer, datetime_start, datetime_end = get_filtered_files()
+    files = filtered_files[:per_page]
     return render_template_string(
         TEMPLATE,
         files=files,
+        items_html=render_image_batch(files, results_snapshot),
         camera_name=CAMERA_NAME,
-        results=analysis_results,
+        results=results_snapshot,
         prompt=PROMPT,
         model=OLLAMA_MODEL,
-        page=page,
-        total_pages=total_pages,
         current_answer=filter_answer,
         datetime_start=datetime_start,
         datetime_end=datetime_end,
-        filtered_files=files
+        filtered_files=filtered_files,
+        has_more=len(filtered_files) > len(files)
     )
+
+
+@app.route("/load_more")
+def load_more():
+    """Return the next filtered image batch for the infinite-scroll client."""
+    per_page = 24
+    try:
+        page = max(1, int(request.args.get("page", 2)))
+    except (TypeError, ValueError):
+        page = 2
+    filtered_files, results_snapshot, _, _, _ = get_filtered_files()
+    start = (page - 1) * per_page
+    files = filtered_files[start:start + per_page]
+    return {
+        "html": render_image_batch(files, results_snapshot),
+        "has_more": start + len(files) < len(filtered_files),
+        "page": page,
+    }
 
 
 # Serve image file for rendering in browser
@@ -183,13 +235,28 @@ def analyze(filename):
         with request_lock:
             response = ask_llava_stream(image_b64, PROMPT)
             print(f"🤖 AI result for {filename}: {response}")
-        analysis_results[filename] = response
+        with results_lock:
+            analysis_results[filename] = response
         db.mark_as_processed(filename, response)
         answer, confidence = parse_response(response)
         send_to_influx(answer, confidence, filename)  # Pass filename here
     except Exception as e:
-        analysis_results[filename] = f"Error: {e}"
+        with results_lock:
+            analysis_results[filename] = f"Error: {e}"
     return redirect("/")
+
+@app.route("/health")
+def health():
+    """Report camera snapshot freshness for Docker/container health checks."""
+    age, stale, in_startup_grace = snapshot_health_state()
+    healthy = in_startup_grace or not stale
+    response = {
+        "status": "healthy" if healthy else "unhealthy",
+        "snapshot_age_seconds": age,
+        "max_snapshot_age_seconds": HEALTH_MAX_SNAPSHOT_AGE,
+        "startup_grace": in_startup_grace,
+    }
+    return response, 200 if healthy else 503
 
 @app.route("/snapshot/control", methods=["POST"])
 def control_snapshot():
@@ -218,34 +285,38 @@ def rtsp_snapshotter():
     print(f"📸 Preparing RTSP snapshots via FFmpeg")
 
     while True:
-        if not snapshot_loop_enabled:
-            time.sleep(1)
-            continue
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"rtsp_{timestamp}.jpg"
-        filepath = os.path.join(FOLDER_PATH, filename)
-
-        cmd = [
-            "ffmpeg",
-            "-rtsp_transport", "tcp",
-            "-y",  # overwrite output
-            "-i", rtsp_url,
-            "-ss", "00:00:05",      # < wait seconds after stream starts
-            "-frames:v", "1",       # < grab one frame
-            "-q:v", "2",            # < good JPEG quality
-            filepath
-        ]
-
-        print(f"📡 Taking snapshot to {filepath}...")
+        sleep_time = REFRESH_TIME
         try:
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-            print(f"✅ Snapshot saved via FFmpeg: {filepath}")
-        except subprocess.CalledProcessError:
-            print("❌ FFmpeg failed to grab snapshot.")
+            if not snapshot_loop_enabled:
+                sleep_time = 1
+                continue
 
-        print("🕒 Waiting for next capture cycle...")
-        time.sleep(REFRESH_TIME)
+            os.makedirs(FOLDER_PATH, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"rtsp_{timestamp}.jpg"
+            filepath = os.path.join(FOLDER_PATH, filename)
+
+            cmd = [
+                "ffmpeg",
+                "-rtsp_transport", "tcp",
+                "-y",  # overwrite output
+                "-i", rtsp_url,
+                "-ss", "00:00:05",      # < wait seconds after stream starts
+                "-frames:v", "1",       # < grab one frame
+                "-q:v", "2",            # < good JPEG quality
+                filepath
+            ]
+
+            print(f"📡 Taking snapshot to {filepath}...")
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           check=True, timeout=60)
+            record_successful_snapshot()
+            print(f"✅ Snapshot saved via FFmpeg: {filepath}")
+        except Exception as e:
+            print(f"❌ RTSP snapshot loop error: {e}")
+        finally:
+            print("🕒 Waiting for next capture cycle...")
+            time.sleep(sleep_time)
 
 def do_one_snapshot():
     rtsp_url = os.getenv("RTSP_URL")
@@ -271,6 +342,7 @@ def do_one_snapshot():
     print(f"📸 Taking manual snapshot to {filepath}...")
     try:
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        record_successful_snapshot()
         print(f"✅ Manual snapshot saved: {filepath}")
     except subprocess.CalledProcessError:
         print("❌ FFmpeg failed to capture snapshot.")
@@ -291,40 +363,51 @@ def folder_watcher():
     print(f"👁️ Watching folder: {FOLDER_PATH}")
     processed = set(db.load_processed_images())
     # Check latest file on startup
-    latest = get_latest_image()
-    if latest and latest not in processed:
-        try:
+    try:
+        latest = get_latest_image()
+        if latest and latest not in processed:
             image_b64 = encode_image_to_base64(os.path.join(FOLDER_PATH, latest))
             with request_lock:
                 response = ask_llava_stream(image_b64, PROMPT)
                 print(f"🤖 AI result for {latest}: {response}")  # Fixed variable name
-            analysis_results[latest] = response
+            with results_lock:
+                analysis_results[latest] = response
             db.mark_as_processed(latest, response)
             answer, confidence = parse_response(response)
             send_to_influx(answer, confidence, latest)  # Pass filename here
             processed.add(latest)
-        except Exception as e:
-            analysis_results[latest] = f"Error: {e}"
+    except Exception as e:
+        print(f"❌ Folder watcher startup error: {e}")
+        if 'latest' in locals() and latest:
+            with results_lock:
+                analysis_results[latest] = f"Error: {e}"
+
     # Monitor folder continuously
     while True:
-        for filename in os.listdir(FOLDER_PATH):
-            if not filename.lower().endswith((".jpg", ".jpeg", ".png")):
-                continue
-            if filename in processed:
-                continue
-            try:
-                image_b64 = encode_image_to_base64(os.path.join(FOLDER_PATH, filename))
-                with request_lock:
-                    response = ask_llava_stream(image_b64, PROMPT)
-                    print(f"🤖 AI result for {filename}: {response}")
-                analysis_results[filename] = response
-                db.mark_as_processed(filename, response)
-                answer, confidence = parse_response(response)
-                send_to_influx(answer, confidence, filename)  # Pass filename here
-                processed.add(filename)
-            except Exception as e:
-                analysis_results[filename] = f"Error: {e}"
-        time.sleep(5)
+        try:
+            for filename in os.listdir(FOLDER_PATH):
+                if not filename.lower().endswith((".jpg", ".jpeg", ".png")):
+                    continue
+                if filename in processed:
+                    continue
+                try:
+                    image_b64 = encode_image_to_base64(os.path.join(FOLDER_PATH, filename))
+                    with request_lock:
+                        response = ask_llava_stream(image_b64, PROMPT)
+                        print(f"🤖 AI result for {filename}: {response}")
+                    with results_lock:
+                        analysis_results[filename] = response
+                    db.mark_as_processed(filename, response)
+                    answer, confidence = parse_response(response)
+                    send_to_influx(answer, confidence, filename)  # Pass filename here
+                    processed.add(filename)
+                except Exception as e:
+                    with results_lock:
+                        analysis_results[filename] = f"Error: {e}"
+            time.sleep(5)
+        except Exception as e:
+            print(f"❌ Folder watcher loop error: {e}")
+            time.sleep(5)
 
 # Get the most recently modified image file
 def get_latest_image():
@@ -465,7 +548,7 @@ def send_to_influx(answer, confidence, filename=None, ts_ns=None):
     except Exception as e:
         print(f"❌ InfluxDB error: {e}")
 
-def cleanup_old_images():
+def _cleanup_old_images():
     """Remove images older than IMAGE_RETENTION_DAYS and update database accordingly."""
     print(f"🧹 Starting cleanup of images older than {IMAGE_RETENTION_DAYS} days...")
     
@@ -481,11 +564,11 @@ def cleanup_old_images():
         filepath = os.path.join(FOLDER_PATH, filename)
         try:
             # Check if file is older than retention period
-            if os.path.getmtime(filepath) < cutoff_time:
+            if os.path.isfile(filepath) and os.path.getmtime(filepath) < cutoff_time:
                 os.remove(filepath)
                 # Remove from in-memory cache as well
-                if filename in analysis_results:
-                    del analysis_results[filename]
+                with results_lock:
+                    analysis_results.pop(filename, None)
                 removed_count += 1
                 print(f"🗑️ Removed old image: {filename}")
         except Exception as e:
@@ -493,6 +576,14 @@ def cleanup_old_images():
     # Clean up database entries for files that no longer exist
     cleanup_database_entries()
     print(f"✅ Cleanup completed. Removed {removed_count} old images.")
+
+def cleanup_old_images():
+    """Run cleanup while marking it so snapshot self-exit checks are paused."""
+    cleanup_active.set()
+    try:
+        return _cleanup_old_images()
+    finally:
+        cleanup_active.clear()
 
 def cleanup_database_entries():
     """Remove database entries for images that no longer exist in the folder."""
@@ -518,11 +609,29 @@ def cleanup_database_entries():
         db.remove_processed_entries(orphaned_entries)
         # Also remove from in-memory cache
         for filename in orphaned_entries:
-            if filename in analysis_results:
-                del analysis_results[filename]
+            with results_lock:
+                analysis_results.pop(filename, None)
         print(f"🗑️ Removed {len(orphaned_entries)} orphaned database entries.")
     else:
         print("✅ No orphaned database entries found.")
+
+def snapshot_health_watchdog():
+    """Exit on persistent snapshot staleness so Docker can restart the app."""
+    print(f"🛡️ Snapshot health watchdog started (checks every {SELF_EXIT_CHECK_INTERVAL}s; "
+          f"threshold={SELF_EXIT_AFTER_STALE}s, enabled={SELF_EXIT_ENABLED})")
+    while True:
+        time.sleep(SELF_EXIT_CHECK_INTERVAL)
+        if not SELF_EXIT_ENABLED or cleanup_active.is_set():
+            continue
+        age, stale, in_startup_grace = snapshot_health_state(SELF_EXIT_AFTER_STALE)
+        if in_startup_grace or not stale:
+            continue
+        print(
+            f"❌ Snapshot health watchdog: no successful snapshot for {age:.0f}s "
+            f"(threshold {SELF_EXIT_AFTER_STALE}s); exiting so Docker restarts the container.",
+            flush=True,
+        )
+        os._exit(1)
 
 def cleanup_scheduler():
     """Background thread that runs cleanup periodically."""
@@ -533,16 +642,56 @@ def cleanup_scheduler():
             cleanup_old_images()
         except Exception as e:
             print(f"❌ Error during scheduled cleanup: {e}")
-        
-        # Wait for next cleanup cycle
-        time.sleep(CLEANUP_INTERVAL)
+        finally:
+            # Wait for next cleanup cycle even after an unexpected error.
+            time.sleep(CLEANUP_INTERVAL)
 
 def start_cleanup_scheduler():
     """Start the cleanup scheduler in a background thread."""
     cleanup_thread = threading.Thread(target=cleanup_scheduler, daemon=True)
     cleanup_thread.start()
     print("🚀 Cleanup scheduler started.")
-start_cleanup_scheduler()
+ITEM_TEMPLATE = """
+{% for file in files %}
+  <div>
+    <img src="/images/{{ file }}" alt="{{ file }}" onclick="showModal('/images/{{ file }}')">
+    <form method="post" action="/analyze/{{ file }}">
+      <button type="submit">Analyze "{{ file }}"</button>
+    </form>
+    {% if results.get(file) %}
+      <div class="result"><strong>Result:</strong><br>{{ results[file] }}</div>
+    {% endif %}
+  </div>
+{% endfor %}
+"""
+
+TEMPLATE = """
+{% for file in files %}
+  <div>
+    <img src="/images/{{ file }}" alt="{{ file }}" onclick="showModal('/images/{{ file }}')">
+    <form method="post" action="/analyze/{{ file }}">
+      <button type="submit">Analyze "{{ file }}"</button>
+    </form>
+    {% if results.get(file) %}
+      <div class="result"><strong>Result:</strong><br>{{ results[file] }}</div>
+    {% endif %}
+  </div>
+{% endfor %}
+"""
+
+TEMPLATE = """
+{% for file in files %}
+  <div>
+    <img src="/images/{{ file }}" alt="{{ file }}" onclick="showModal('/images/{{ file }}')">
+    <form method="post" action="/analyze/{{ file }}">
+      <button type="submit">Analyze "{{ file }}"</button>
+    </form>
+    {% if results.get(file) %}
+      <div class="result"><strong>Result:</strong><br>{{ results[file] }}</div>
+    {% endif %}
+  </div>
+{% endfor %}
+"""
 
 TEMPLATE = """
 <!DOCTYPE html>
@@ -643,63 +792,49 @@ TEMPLATE = """
      <button type="submit">Clear Filters</button>
    </form>
    <hr>
-  {% for file in files %}
-    <div>
-      <img src="/images/{{ file }}" alt="{{ file }}" onclick="showModal('/images/{{ file }}')">
-      <form method="post" action="/analyze/{{ file }}">
-        <button type="submit">Analyze "{{ file }}"</button>
-      </form>
-      {% if results.get(file) %}
-        <div class="result"><strong>Result:</strong><br>{{ results[file] }}</div>
-      {% endif %}
-    </div>
-  {% endfor %}
+  <div id="image-list">
+    {{ items_html|safe }}
+  </div>
 
-    {% set raw_params = {
-        'answer': current_answer if current_answer else None,
-        'datetime_start': datetime_start if datetime_start else None,
-        'datetime_end': datetime_end if datetime_end else None
-    } %}
-
-    {# Remove keys with None or empty values #}
-    {% set params = {} %}
-    {% for key, value in raw_params.items() %}
-        {% if value %}
-            {% set _ = params.update({key: value}) %}
-        {% endif %}
-    {% endfor %}
-
-    {% if total_pages > 1 %}
-    <div style="margin-top: 2rem; display: flex; align-items: center; gap: 1rem;">
-
-        {% if page > 1 %}
-            {% set prev_params = params.copy() %}
-            {% set _ = prev_params.update({'page': page - 1}) %}
-            <a href="/?{{ prev_params|urlencode }}">⬅ Previous</a>
-        {% endif %}
-
-        <form method="get" action="/" style="display:inline;">
-            <label for="page-select">Page</label>
-            <input id="page-select" name="page" type="number" min="1" max="{{ total_pages }}" value="{{ page }}" style="width: 4rem;">
-            {% for key, value in params.items() %}
-                <input type="hidden" name="{{ key }}" value="{{ value }}">
-            {% endfor %}
-            <button type="submit">Go</button>
-        </form>
-
-        <span>of {{ total_pages }}</span>
-
-        {% if page < total_pages %}
-            {% set next_params = params.copy() %}
-            {% set _ = next_params.update({'page': page + 1}) %}
-            <a href="/?{{ next_params|urlencode }}">Next ➡</a>
-        {% endif %}
-
-    </div>
-    {% endif %}
+  <div id="scroll-status" style="text-align: center; margin: 2rem;">Loading...</div>
+  <div id="scroll-sentinel" aria-hidden="true"></div>
 
     <script>
     const filteredImages = {{ filtered_files|tojson }};
+    let nextPage = 2;
+    let loading = false;
+    let hasMore = {{ has_more|tojson }};
+    const imageList = document.getElementById('image-list');
+    const status = document.getElementById('scroll-status');
+    const sentinel = document.getElementById('scroll-sentinel');
+
+    async function loadMoreImages() {
+        if (loading || !hasMore) return;
+        loading = true;
+        status.textContent = 'Loading...';
+        const params = new URLSearchParams(window.location.search);
+        params.set('page', nextPage);
+        try {
+            const response = await fetch(`/load_more?${params.toString()}`);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const data = await response.json();
+            imageList.insertAdjacentHTML('beforeend', data.html);
+            hasMore = data.has_more;
+            nextPage = data.page + 1;
+            if (!hasMore) status.textContent = 'No more images';
+        } catch (error) {
+            console.error('Unable to load more images:', error);
+            status.textContent = 'Unable to load more images. Scroll to retry.';
+        } finally {
+            loading = false;
+        }
+    }
+
+    if (!hasMore) status.textContent = 'No more images';
+    const observer = new IntersectionObserver(entries => {
+        if (entries.some(entry => entry.isIntersecting)) loadMoreImages();
+    }, { rootMargin: '400px' });
+    observer.observe(sentinel);
     </script>
 
     <!-- Modal -->
@@ -786,7 +921,8 @@ if __name__ == "__main__":
     snapshot_thread = threading.Thread(target=rtsp_snapshotter, daemon=True)
     snapshot_thread.start()
     threading.Thread(target=run_http, daemon=True).start()
-    run_https() 
+    threading.Thread(target=snapshot_health_watchdog, daemon=True).start()
     start_cleanup_scheduler()
     print("🧹 Running initial cleanup on startup...")
     cleanup_old_images()
+    run_https()
